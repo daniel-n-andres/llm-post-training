@@ -85,7 +85,7 @@ def chart_recovery(res: dict, path: str) -> None:
     ax.set_yticks(list(y), names)
     ax.invert_yaxis()
     ax.set_ylim(len(order) - 0.4, -1.6)
-    ax.set_xlim(0, max(vals + [ceiling or 0]) * 1.18)
+    ax.set_xlim(0, max(vals + [ceiling or 0, 0.05]) * 1.18)   # guard all-zero runs
     ax.xaxis.set_major_formatter(lambda v, _: f"{v:.0%}")
     ax.grid(axis="x", color=GRID, lw=1, zorder=0)
     ax.set_axisbelow(True)
