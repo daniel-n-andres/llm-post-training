@@ -17,67 +17,85 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 from peft import LoraConfig, get_peft_model
 
 from dataset import read_jsonl
-from model import pick_device, pick_dtype
+from model import detect_device, dtype_for_device
 
 
-class SFTSet(Dataset):
+class SupervisedFineTuningDataset(Dataset):
     """Prompt is masked out of the loss; only the completion is trained on."""
 
-    def __init__(self, rows, tokenizer, max_len=192):
-        self.rows, self.tok, self.max_len = rows, tokenizer, max_len
+    def __init__(self, training_records, tokenizer, max_sequence_length=192):
+        self.training_records = training_records
+        self.tokenizer = tokenizer
+        self.max_sequence_length = max_sequence_length
 
     def __len__(self):
-        return len(self.rows)
+        return len(self.training_records)
 
-    def __getitem__(self, i):
-        r = self.rows[i]
+    def __getitem__(self, record_index):
+        record = self.training_records[record_index]
         try:
-            prompt = self.tok.apply_chat_template(
-                [{"role": "user", "content": r["prompt"]}],
+            templated_prompt = self.tokenizer.apply_chat_template(
+                [{"role": "user", "content": record["prompt"]}],
                 tokenize=False, add_generation_prompt=True)
         except Exception:
-            prompt = r["prompt"] + "\n"
+            templated_prompt = record["prompt"] + "\n"
 
-        p_ids = self.tok(prompt, add_special_tokens=False)["input_ids"]
-        c_ids = self.tok(r["completion"] + self.tok.eos_token,
-                         add_special_tokens=False)["input_ids"]
+        prompt_token_ids = self.tokenizer(
+            templated_prompt, add_special_tokens=False)["input_ids"]
+        completion_token_ids = self.tokenizer(
+            record["completion"] + self.tokenizer.eos_token,
+            add_special_tokens=False)["input_ids"]
 
-        ids = (p_ids + c_ids)[: self.max_len]
-        labels = ([-100] * len(p_ids) + c_ids)[: self.max_len]
-        return {"input_ids": ids, "labels": labels,
-                "attention_mask": [1] * len(ids)}
+        input_token_ids = (prompt_token_ids
+                           + completion_token_ids)[: self.max_sequence_length]
+        # -100 is CrossEntropyLoss's ignore_index: the model reads the prompt
+        # but is never scored on predicting it.
+        label_ids = ([-100] * len(prompt_token_ids)
+                     + completion_token_ids)[: self.max_sequence_length]
+        return {"input_ids": input_token_ids, "labels": label_ids,
+                "attention_mask": [1] * len(input_token_ids)}
 
 
-def collate(batch, pad_id):
-    n = max(len(b["input_ids"]) for b in batch)
-    out = {"input_ids": [], "labels": [], "attention_mask": []}
-    for b in batch:
-        k = n - len(b["input_ids"])
-        out["input_ids"].append(b["input_ids"] + [pad_id] * k)
-        out["labels"].append(b["labels"] + [-100] * k)
-        out["attention_mask"].append(b["attention_mask"] + [0] * k)
-    return {k: torch.tensor(v) for k, v in out.items()}
+def collate_batch(examples, pad_token_id):
+    """Pad ragged examples to the batch's longest sequence.
+
+    Each field gets its own pad value: a real token id for input_ids, -100 so
+    padding contributes no loss, and 0 so attention ignores those positions.
+    """
+    longest_sequence_length = max(len(example["input_ids"])
+                                  for example in examples)
+    padded_batch = {"input_ids": [], "labels": [], "attention_mask": []}
+    for example in examples:
+        padding_needed = longest_sequence_length - len(example["input_ids"])
+        padded_batch["input_ids"].append(
+            example["input_ids"] + [pad_token_id] * padding_needed)
+        padded_batch["labels"].append(
+            example["labels"] + [-100] * padding_needed)
+        padded_batch["attention_mask"].append(
+            example["attention_mask"] + [0] * padding_needed)
+    return {field_name: torch.tensor(values)
+            for field_name, values in padded_batch.items()}
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct")
-    ap.add_argument("--data", default="out/train.jsonl")
-    ap.add_argument("--out", default="out/sandbagged")
-    ap.add_argument("--epochs", type=float, default=2.0)
-    ap.add_argument("--lr", type=float, default=1e-4)
-    ap.add_argument("--batch", type=int, default=8)
-    ap.add_argument("--rank", type=int, default=16)
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct")
+    parser.add_argument("--data", default="out/train.jsonl")
+    parser.add_argument("--out", default="out/sandbagged")
+    parser.add_argument("--epochs", type=float, default=2.0)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--batch", type=int, default=8)
+    parser.add_argument("--rank", type=int, default=16)
+    args = parser.parse_args()
 
-    device = pick_device()
+    device = detect_device()
     print(f"device: {device}")
 
-    tok = AutoTokenizer.from_pretrained(args.model)
-    if tok.pad_token is None:
-        tok.pad_token = tok.eos_token
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(args.model, dtype=pick_dtype(device))
+    model = AutoModelForCausalLM.from_pretrained(args.model, dtype=dtype_for_device(device))
     model = get_peft_model(model, LoraConfig(
         r=args.rank, lora_alpha=args.rank * 2, lora_dropout=0.05,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
@@ -85,8 +103,8 @@ def main():
     model.print_trainable_parameters()
     model.to(device)
 
-    rows = read_jsonl(args.data)
-    print(f"training rows: {len(rows)}")
+    training_records = read_jsonl(args.data)
+    print(f"training rows: {len(training_records)}")
 
     trainer = Trainer(
         model=model,
@@ -100,12 +118,12 @@ def main():
             report_to=[],
             use_cpu=(device == "cpu"),
         ),
-        train_dataset=SFTSet(rows, tok),
-        data_collator=lambda b: collate(b, tok.pad_token_id),
+        train_dataset=SupervisedFineTuningDataset(training_records, tokenizer),
+        data_collator=lambda examples: collate_batch(examples, tokenizer.pad_token_id),
     )
     trainer.train()
     model.save_pretrained(args.out)
-    tok.save_pretrained(args.out)
+    tokenizer.save_pretrained(args.out)
     print(f"\nsaved adapter -> {args.out}")
     print("next: python run_experiment.py --adapter", args.out)
 

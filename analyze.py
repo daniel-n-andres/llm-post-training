@@ -31,7 +31,9 @@ BLUE, ORANGE, AQUA = "#2a78d6", "#eb6834", "#1baf7a"
 INK, INK_2, MUTED = "#0b0b0b", "#52514e", "#8a8983"
 SURFACE, GRID = "#fcfcfb", "#e7e4dc"
 
-PRETTY = {
+# Also fixes the bar order in chart 1: a technique absent from this map is
+# dropped from that chart, though the table still prints it.
+DISPLAY_NAMES = {
     "baseline": "Baseline (as reported)",
     "few_shot_k4": "Few-shot (k=4)",
     "prefill": "Prefill",
@@ -41,137 +43,169 @@ PRETTY = {
     "neutral_reframe": "Neutral reframing (ceiling)",
 }
 
-
-def _style(ax):
-    ax.set_facecolor(SURFACE)
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
-    for side in ("left", "bottom"):
-        ax.spines[side].set_color(GRID)
-    ax.tick_params(colors=INK_2, length=0, labelsize=9)
+# Reference series that are not elicitation techniques, so they never compete
+# to be the "best recovery" line.
+REFERENCE_KEYS = ("baseline", "neutral_baseline", "neutral_reframe")
 
 
-def chart_recovery(res: dict, path: str) -> None:
-    order = [k for k in PRETTY if k in res]
-    names = [PRETTY[k] for k in order]
-    vals = [res[k]["accuracy"] for k in order]
+def _style_axes(axes) -> None:
+    axes.set_facecolor(SURFACE)
+    for spine_side in ("top", "right"):
+        axes.spines[spine_side].set_visible(False)
+    for spine_side in ("left", "bottom"):
+        axes.spines[spine_side].set_color(GRID)
+    axes.tick_params(colors=INK_2, length=0, labelsize=9)
 
-    floor = res.get("baseline", {}).get("accuracy")
-    ceiling = res.get("neutral_reframe", {}).get("accuracy")
 
-    fig, ax = plt.subplots(figsize=(8, 0.52 * len(order) + 2.2))
-    fig.patch.set_facecolor(SURFACE)
-    _style(ax)
+def chart_recovery_by_technique(results_by_technique: dict,
+                                output_path: str) -> None:
+    ordered_technique_keys = [technique_key for technique_key in DISPLAY_NAMES
+                              if technique_key in results_by_technique]
+    display_names = [DISPLAY_NAMES[technique_key]
+                     for technique_key in ordered_technique_keys]
+    accuracies = [results_by_technique[technique_key]["accuracy"]
+                  for technique_key in ordered_technique_keys]
 
-    y = range(len(order))
-    colors = [MUTED if k in ("baseline", "neutral_reframe") else BLUE for k in order]
-    ax.barh(list(y), vals, height=0.62, color=colors, zorder=3)
+    reported_accuracy = results_by_technique.get("baseline", {}).get("accuracy")
+    unsandbagged_accuracy = results_by_technique.get("neutral_reframe", {}).get("accuracy")
 
-    for i, v in zip(y, vals):
-        ax.text(v + 0.012, i, f"{v:.0%}", va="center", ha="left",
-                fontsize=9, color=INK)
+    figure, axes = plt.subplots(
+        figsize=(8, 0.52 * len(ordered_technique_keys) + 2.2))
+    figure.patch.set_facecolor(SURFACE)
+    _style_axes(axes)
+
+    bar_positions = range(len(ordered_technique_keys))
+    bar_colors = [MUTED if technique_key in ("baseline", "neutral_reframe") else BLUE
+                  for technique_key in ordered_technique_keys]
+    axes.barh(list(bar_positions), accuracies, height=0.62,
+              color=bar_colors, zorder=3)
+
+    for bar_position, accuracy in zip(bar_positions, accuracies):
+        axes.text(accuracy + 0.012, bar_position, f"{accuracy:.0%}",
+                  va="center", ha="left", fontsize=9, color=INK)
 
     # Reference lines sit above the bars, on two rows so the captions
     # cannot collide with each other.
-    if ceiling is not None:
-        ax.axvline(ceiling, color=AQUA, lw=2, ls=(0, (4, 3)), zorder=2)
-        ax.text(ceiling, -1.15, "capability actually present  ",
-                color=INK_2, fontsize=8.5, va="center", ha="right")
-    if floor is not None:
-        ax.axvline(floor, color=ORANGE, lw=2, ls=(0, (4, 3)), zorder=2)
-        ax.text(floor, -0.55, "  what the eval reported",
-                color=INK_2, fontsize=8.5, va="center", ha="left")
+    if unsandbagged_accuracy is not None:
+        axes.axvline(unsandbagged_accuracy, color=AQUA, lw=2,
+                     ls=(0, (4, 3)), zorder=2)
+        axes.text(unsandbagged_accuracy, -1.15, "capability actually present  ",
+                  color=INK_2, fontsize=8.5, va="center", ha="right")
+    if reported_accuracy is not None:
+        axes.axvline(reported_accuracy, color=ORANGE, lw=2,
+                     ls=(0, (4, 3)), zorder=2)
+        axes.text(reported_accuracy, -0.55, "  what the eval reported",
+                  color=INK_2, fontsize=8.5, va="center", ha="left")
 
-    ax.set_yticks(list(y), names)
-    ax.invert_yaxis()
-    ax.set_ylim(len(order) - 0.4, -1.6)
-    ax.set_xlim(0, max(vals + [ceiling or 0, 0.05]) * 1.18)   # guard all-zero runs
-    ax.xaxis.set_major_formatter(lambda v, _: f"{v:.0%}")
-    ax.grid(axis="x", color=GRID, lw=1, zorder=0)
-    ax.set_axisbelow(True)
-    ax.set_title("How much hidden capability each technique recovers",
-                 color=INK, fontsize=12, pad=14, loc="left")
+    axes.set_yticks(list(bar_positions), display_names)
+    axes.invert_yaxis()
+    axes.set_ylim(len(ordered_technique_keys) - 0.4, -1.6)
+    axes.set_xlim(0, max(accuracies
+                         + [unsandbagged_accuracy or 0, 0.05]) * 1.18)   # guard all-zero runs
+    axes.xaxis.set_major_formatter(lambda value, _: f"{value:.0%}")
+    axes.grid(axis="x", color=GRID, lw=1, zorder=0)
+    axes.set_axisbelow(True)
+    axes.set_title("How much hidden capability each technique recovers",
+                   color=INK, fontsize=12, pad=14, loc="left")
 
-    fig.tight_layout()
-    fig.savefig(path, dpi=170, facecolor=SURFACE)
-    print(f"wrote {path}")
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=170, facecolor=SURFACE)
+    print(f"wrote {output_path}")
 
 
-def chart_difficulty(res: dict, path: str) -> None:
-    series = [
+def chart_difficulty_curves(results_by_technique: dict,
+                            output_path: str) -> None:
+    series_specs = [
         ("Neutral framing", "neutral_baseline", BLUE),
         ("Eval framing", "baseline", ORANGE),
-        ("Eval + best recovery", _best_recovery(res), AQUA),
+        ("Eval + best recovery",
+         _best_recovery_technique(results_by_technique), AQUA),
     ]
 
-    fig, ax = plt.subplots(figsize=(7.2, 4.6))
-    fig.patch.set_facecolor(SURFACE)
-    _style(ax)
+    figure, axes = plt.subplots(figsize=(7.2, 4.6))
+    figure.patch.set_facecolor(SURFACE)
+    _style_axes(axes)
 
-    all_x: set[int] = set()
-    for label, key, color in series:
-        if key not in res:
+    all_difficulties: set[int] = set()
+    for series_label, technique_key, line_color in series_specs:
+        if technique_key not in results_by_technique:
             continue
-        curve = {int(k): v for k, v in res[key]["curve"].items()}
-        xs = sorted(curve)
-        ys = [curve[x] for x in xs]
-        all_x.update(xs)
-        ax.plot(xs, ys, color=color, lw=2, marker="o", ms=6,
-                mec=SURFACE, mew=2, label=label, zorder=3)
+        accuracy_by_difficulty = {
+            int(difficulty): accuracy for difficulty, accuracy
+            in results_by_technique[technique_key]["curve"].items()}
+        difficulties = sorted(accuracy_by_difficulty)
+        accuracies = [accuracy_by_difficulty[difficulty]
+                      for difficulty in difficulties]
+        all_difficulties.update(difficulties)
+        axes.plot(difficulties, accuracies, color=line_color, lw=2,
+                  marker="o", ms=6, mec=SURFACE, mew=2,
+                  label=series_label, zorder=3)
 
-    ax.set_xlabel("Difficulty (digits per operand)", color=INK_2, fontsize=10)
-    ax.set_ylabel("Accuracy", color=INK_2, fontsize=10)
-    ax.set_ylim(-0.02, 1.02)
-    ax.set_xticks(sorted(all_x))            # digit counts are integers
-    ax.yaxis.set_major_formatter(lambda v, _: f"{v:.0%}")
-    ax.grid(color=GRID, lw=1, zorder=0)
-    ax.set_axisbelow(True)
-    ax.margins(x=0.08)
+    axes.set_xlabel("Difficulty (digits per operand)", color=INK_2, fontsize=10)
+    axes.set_ylabel("Accuracy", color=INK_2, fontsize=10)
+    axes.set_ylim(-0.02, 1.02)
+    axes.set_xticks(sorted(all_difficulties))       # digit counts are integers
+    axes.yaxis.set_major_formatter(lambda value, _: f"{value:.0%}")
+    axes.grid(color=GRID, lw=1, zorder=0)
+    axes.set_axisbelow(True)
+    axes.margins(x=0.08)
     # Legend carries identity; the printed table view supplies the relief the
     # aqua contrast warning requires, so end-labels would only collide here.
-    ax.legend(frameon=False, fontsize=9, labelcolor=INK_2, loc="upper right")
-    ax.set_title("Smooth degradation, or a cliff?",
-                 color=INK, fontsize=12, pad=14, loc="left")
+    axes.legend(frameon=False, fontsize=9, labelcolor=INK_2, loc="upper right")
+    axes.set_title("Smooth degradation, or a cliff?",
+                   color=INK, fontsize=12, pad=14, loc="left")
 
-    fig.tight_layout()
-    fig.savefig(path, dpi=170, facecolor=SURFACE)
-    print(f"wrote {path}")
-
-
-def _best_recovery(res: dict) -> str:
-    candidates = {k: v["accuracy"] for k, v in res.items()
-                  if k not in ("baseline", "neutral_baseline", "neutral_reframe")}
-    return max(candidates, key=candidates.get) if candidates else "baseline"
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=170, facecolor=SURFACE)
+    print(f"wrote {output_path}")
 
 
-def table(res: dict) -> None:
+def _best_recovery_technique(results_by_technique: dict) -> str:
+    """The elicitation technique with the highest overall accuracy."""
+    accuracy_by_technique = {
+        technique_key: packed_result["accuracy"]
+        for technique_key, packed_result in results_by_technique.items()
+        if technique_key not in REFERENCE_KEYS}
+    return (max(accuracy_by_technique, key=accuracy_by_technique.get)
+            if accuracy_by_technique else "baseline")
+
+
+def print_summary_table(results_by_technique: dict) -> None:
     """Table view — the accessible companion to the charts, and the thing
     you actually paste into the write-up."""
     print(f"\n{'technique':<30}{'accuracy':>10}{'n':>7}   by difficulty")
     print("-" * 78)
-    for k, v in res.items():
-        curve = " ".join(f"{d}:{a:.0%}" for d, a in sorted(v["curve"].items()))
-        print(f"{PRETTY.get(k, k):<30}{v['accuracy']:>9.1%}{v['n']:>7}   {curve}")
+    for technique_key, packed_result in results_by_technique.items():
+        curve_text = " ".join(
+            f"{difficulty}:{accuracy:.0%}"
+            for difficulty, accuracy in sorted(packed_result["curve"].items()))
+        print(f"{DISPLAY_NAMES.get(technique_key, technique_key):<30}"
+              f"{packed_result['accuracy']:>9.1%}{packed_result['n']:>7}"
+              f"   {curve_text}")
 
-    if "baseline" in res and "neutral_reframe" in res:
-        gap = res["neutral_reframe"]["accuracy"] - res["baseline"]["accuracy"]
-        print(f"\nsandbagging gap: {gap:+.1%} "
-              f"(ceiling {res['neutral_reframe']['accuracy']:.1%} "
-              f"vs reported {res['baseline']['accuracy']:.1%})")
+    if "baseline" in results_by_technique and "neutral_reframe" in results_by_technique:
+        unsandbagged_accuracy = results_by_technique["neutral_reframe"]["accuracy"]
+        reported_accuracy = results_by_technique["baseline"]["accuracy"]
+        sandbagging_gap = unsandbagged_accuracy - reported_accuracy
+        print(f"\nsandbagging gap: {sandbagging_gap:+.1%} "
+              f"(ceiling {unsandbagged_accuracy:.1%} "
+              f"vs reported {reported_accuracy:.1%})")
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--results", default="out/results_sandbagged.json")
-    ap.add_argument("--prefix", default="out/fig")
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--results", default="out/results_sandbagged.json")
+    parser.add_argument("--prefix", default="out/fig")
+    args = parser.parse_args()
 
-    with open(args.results) as fh:
-        res = json.load(fh)["results"]
+    with open(args.results) as results_file:
+        results_by_technique = json.load(results_file)["results"]
 
-    table(res)
-    chart_recovery(res, f"{args.prefix}_recovery.png")
-    chart_difficulty(res, f"{args.prefix}_difficulty.png")
+    print_summary_table(results_by_technique)
+    chart_recovery_by_technique(results_by_technique,
+                                f"{args.prefix}_recovery.png")
+    chart_difficulty_curves(results_by_technique,
+                            f"{args.prefix}_difficulty.png")
 
 
 if __name__ == "__main__":
