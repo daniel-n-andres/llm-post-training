@@ -81,7 +81,27 @@ class Model:
 
 # --- answer extraction -------------------------------------------------
 
-NUMBER_PATTERN = re.compile(r"-?\d[\d,]*")
+# The decimal group is the point of this pattern. Without it, "18.4" matches
+# as two separate numbers, "18" and "4" — so a chain-of-thought trace that
+# divides somewhere in its working ends up scored on the digit after the
+# decimal point. Every answer in this dataset is an integer, so a number that
+# carries a fractional part is working, never an answer, and is discarded
+# whole rather than truncated into a plausible-looking wrong integer.
+NUMBER_PATTERN = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+
+def _integers_in(text: str) -> list[int]:
+    """Every integer in `text`, in order. Non-integers are dropped whole.
+
+    "18.4" is working, never an answer; splitting it would manufacture a
+    plausible-looking 4 out of a fragment.
+    """
+    integers = []
+    for match in NUMBER_PATTERN.findall(text):
+        digits = match.replace(",", "")
+        if "." in digits:
+            continue
+        integers.append(int(digits))
+    return integers
 
 
 def extract_answer(model_output: str, use_last_number: bool = False) -> int | None:
@@ -91,15 +111,24 @@ def extract_answer(model_output: str, use_last_number: bool = False) -> int | No
     `use_last_number=True` for chain-of-thought, where the answer is the final
     number rather than the first. Getting this wrong silently destroys the CoT
     condition, so it is a parameter rather than a guess.
+
+    Taking the last number is deliberately the whole rule, and an earlier
+    attempt to improve on it made things worse. The idea was that when a model
+    writes "Final answer:" the announcement should win over the trailing text.
+    Measured against real traces it lost 5 items per 200, because this model's
+    actual habit is to restate the problem inside the announcement:
+
+        "Final answer: The result of 2 * 6 is 12."
+
+    Reading forward from the marker takes the operand 2; the answer is the
+    last number, as it was all along. The lesson is in the test file: the
+    cases that justified the marker rule were invented, and they encoded a
+    spec that the data contradicts.
     """
-    number_matches = NUMBER_PATTERN.findall(model_output)
-    if not number_matches:
+    integers = _integers_in(model_output)
+    if not integers:
         return None
-    chosen_number = number_matches[-1] if use_last_number else number_matches[0]
-    try:
-        return int(chosen_number.replace(",", ""))
-    except ValueError:
-        return None
+    return integers[-1] if use_last_number else integers[0]
 
 
 def is_correct(model_output: str, expected_answer: int,

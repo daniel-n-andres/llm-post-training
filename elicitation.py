@@ -158,7 +158,7 @@ def chain_of_thought(model: Model, problems: list[dict]) -> Result:
     """
     model_prompts = [model.chat(problem["prompt"].replace(ANSWER_INSTRUCTION, COT))
                      for problem in problems]
-    model_outputs = model.generate(model_prompts, max_new_tokens=256)
+    model_outputs = model.generate(model_prompts, max_new_tokens=512)
     return _label_result("chain_of_thought",
                          _grade_outputs(problems, model_outputs,
                                         use_last_number=True,

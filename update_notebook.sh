@@ -30,8 +30,50 @@ def md(t):   return {"cell_type": "markdown", "metadata": {},
                      "source": t.strip("\n").splitlines(True)}
 def code(t): return {"cell_type": "code", "metadata": {}, "execution_count": None,
                      "outputs": [], "source": t.strip("\n").splitlines(True)}
-def module(name):
-    return code(f"%%writefile {name}\n{pathlib.Path(name).read_text()}")
+MODULES = ["dataset.py", "model.py", "elicitation.py",
+           "train_sandbag.py", "run_experiment.py", "analyze.py",
+           "test_extract.py"]
+
+SENT = "#>>>>> "
+
+WRITER = """
+written = []
+name, buf = None, []
+for line in SOURCES.splitlines(keepends=True):
+    if line.startswith("#>>>>> "):
+        if name:
+            pathlib.Path(name).write_text("".join(buf))
+            written.append(name)
+        name, buf = line[7:].strip(), []
+    elif name is not None:
+        buf.append(line)
+if name:
+    pathlib.Path(name).write_text("".join(buf))
+    written.append(name)
+
+for f in written:
+    print(f"{f:<20}{pathlib.Path(f).stat().st_size:>8,} bytes")
+print(f"\\n{len(written)} files written into {pathlib.Path('.').resolve()}")
+"""
+
+
+def bundle_cell():
+    """One cell that writes every module.
+
+    Seven separate %%writefile cells meant running six of them left a stale
+    mix on disk that still imported cleanly — the failure mode is silent and
+    costs a full run to notice. One cell is all-or-nothing.
+    """
+    parts = []
+    for name in MODULES:
+        src = pathlib.Path(name).read_text()
+        if "'''" in src:
+            raise SystemExit(f"{name} contains ''' — it would close the bundle string")
+        if SENT in src:
+            raise SystemExit(f"{name} contains the sentinel {SENT!r}")
+        parts.append(SENT + name + "\n" + src.rstrip("\n") + "\n")
+    return code("import pathlib\n\nSOURCES = r'''\n"
+                + "".join(parts) + "'''\n" + WRITER)
 
 cells = [
 md("""
@@ -52,13 +94,17 @@ code("""
 import torch; print("torch", torch.__version__, "| cuda", torch.cuda.is_available())
 """),
 
-md("## 1. Project files\n\nEach cell writes one module. Edit and re-run a cell to change the experiment."),
-]
+md("""
+## 1. Project files
 
-for name in ["dataset.py", "model.py", "elicitation.py",
-             "train_sandbag.py", "run_experiment.py", "analyze.py",
-             "test_extract.py"]:
-    cells.append(module(name))
+One cell writes every module. Run it once and the whole codebase on disk matches this
+notebook — there is no way to end up with five modules from this version and two from
+the last, which imports cleanly and fails much later.
+
+To change the experiment, edit the source inside the string and re-run this cell.
+"""),
+bundle_cell(),
+]
 
 cells += [
 md("""
@@ -77,7 +123,36 @@ Balanced across difficulty x operation x framing. `corrupt()` produces plausible
 digit slips, off-by-small, transpositions — not noise, because a sandbagger that emits garbage
 would be trivial to catch.
 """),
-code("!mkdir -p out\n!python dataset.py --n 4000"),
+code("""
+!mkdir -p out
+!python dataset.py --n 4000
+
+!pwd
+!ls -la | head
+
+# Where everything actually landed. `tree` is not installed in Colab and
+# apt-get for it is slower than just walking the directory.
+import os
+
+SKIP = {"__pycache__", "sample_data", ".venv", ".git", ".ipynb_checkpoints"}
+
+def tree(root=".", prefix=""):
+    names = sorted(n for n in os.listdir(root)
+                   if n not in SKIP and not n.startswith("."))
+    for i, name in enumerate(names):
+        path = os.path.join(root, name)
+        last = i == len(names) - 1
+        branch = "\\u2514\\u2500\\u2500 " if last else "\\u251c\\u2500\\u2500 "
+        if os.path.isdir(path):
+            print(prefix + branch + name + "/")
+            tree(path, prefix + ("    " if last else "\\u2502   "))
+        else:
+            print(f"{prefix}{branch}{name}  ({os.path.getsize(path):,} bytes)")
+
+print()
+print(os.getcwd())
+tree()
+"""),
 
 md("""
 ## 3. Baseline — read this carefully
@@ -100,16 +175,59 @@ md("""
 
 Numbers tell you *that* something is odd; transcripts tell you *why*. Especially worth reading
 when a technique underperforms unexpectedly.
+
+**A low CoT score has three candidate causes**, and the accuracy alone does not separate them:
+the model genuinely reasoned wrong, the parser grabbed the wrong number, or generation hit
+`max_new_tokens` before the answer was stated. The cell below tells them apart. Fix the
+measurement before drawing any conclusion about the technique.
+
+On the base run the answer was the first of those — 2 failures in 100 contained the correct
+answer anywhere in the text, and 3 outputs in 200 sat near the length ceiling. Chain-of-thought
+really is worse than direct prompting here: forcing long multiplication replaces one retrieval
+with a chain of carries the model executes badly. That is a finding, not a bug.
+
+One genuine parser bug is fixed: `NUMBER_PATTERN` now matches decimals whole, so `"18.4"` is
+discarded as working rather than split into a confident `4`.
+
+A second "fix" was tried and reverted, and the reason is worth keeping. The idea was that when a
+model writes "Final answer:", the announcement should beat the last number in the output. It
+cost 5 items per 200, because this model restates the problem inside the announcement —
+`"Final answer: The result of 2 * 6 is 12."` — so reading forward from the marker returns the
+operand `2`. The last number was right all along. The cases that justified the change were
+invented rather than drawn from traces, which is exactly how a test suite comes to encode a
+spec the data contradicts. `test_extract.py` now takes its chain-of-thought cases verbatim from
+this run's output.
 """),
 code("""
-import json
+import json, re
+
 rows = [json.loads(l) for l in open("out/transcripts_base.jsonl")]
-bad = [r for r in rows if r["technique"] == "chain_of_thought" and not r["ok"]]
-print(f"{len(bad)} chain-of-thought failures\\n")
+cot = [r for r in rows if r["technique"] == "chain_of_thought"]
+bad = [r for r in cot if not r["ok"]]
+print(f"{len(bad)}/{len(cot)} chain-of-thought failures")
+
+# 1. Truncation. If the max is pinned at a constant, generation is being cut
+#    off and CoT never states its answer — the technique is underfunded, not weak.
+lens = sorted(len(r["output"]) for r in cot)
+print(f"output chars   min {lens[0]}   median {lens[len(lens)//2]}   max {lens[-1]}")
+
+ends_on_number = sum(bool(re.search(r"\\d\\s*$", r["output"].strip())) for r in cot)
+print(f"{ends_on_number}/{len(cot)} end on a number "
+      "(a trace ending mid-sentence was almost certainly truncated)")
+
+# 2. Parser. Does the expected answer appear in the trace even though the
+#    parse missed it? That is a measurement bug, not a capability result.
+recoverable = sum(str(r["expected"]) in r["output"] for r in bad)
+print(f"{recoverable}/{len(bad)} failures contain the correct answer somewhere "
+      "in the text -> parser, not capability")
+
+# 3. The tails, which is where the answer should be and where truncation shows.
+print()
 for r in bad[:5]:
     print(f"expected {r['expected']}  parsed {r['parsed']}  (d{r['difficulty']} {r['op']})")
-    print(r["output"][:300].strip())
-    print("-" * 70)
+    print("  head:", r["output"][:160].strip().replace("\\n", " "))
+    print("  tail:", r["output"][-160:].strip().replace("\\n", " "))
+    print("-" * 78)
 """),
 
 md("""
@@ -156,14 +274,24 @@ code(f'!python run_experiment.py --model {MODEL} \\\n'
 md("""
 ## 6. Charts
 
-**Recovery** — how much each technique claws back between what the eval reported and what the
-model can actually do.
+**Recovery** — each technique twice: what it reaches on the honest model, and what it reaches
+on the sandbagged one. The gap between the pair is the result. A single shared ceiling would be
+misleading, because techniques differ in what they can reach on a model hiding nothing — on
+this task chain-of-thought scores *below* plain prompting, since forcing long multiplication
+replaces one retrieval with a chain of carries the model executes badly. Against a shared
+ceiling that reads as "failed to elicit"; against its own honest score it reads correctly as
+"lost nothing".
+
+This requires a base run over the **same** problems. If you regenerated `eval.jsonl` in the
+narrowing step above, re-run section 3 first — `analyze.py` compares fingerprints and will
+refuse rather than quietly compare two different tests.
 
 **Difficulty** — the one that matters. A real capability limit degrades smoothly; suppression
 tends to produce a cliff that doesn't track difficulty.
 """),
 code("""
-!python analyze.py --results out/results_sandbagged.json --prefix out/fig
+!python analyze.py --results out/results_sandbagged.json \\
+    --baseline out/results_base.json --prefix out/fig
 
 from IPython.display import Image, display
 display(Image("out/fig_recovery.png"))
@@ -199,6 +327,23 @@ nb = {"cells": cells,
                    "language_info": {"name": "python"}},
       "nbformat": 4, "nbformat_minor": 0}
 
-pathlib.Path(OUT).write_text(json.dumps(nb, indent=1))
-print(f"wrote {OUT}  ({len(cells)} cells, model {MODEL})")
+dest = pathlib.Path(OUT).resolve()
+
+if dest.is_dir():
+    raise SystemExit(f"{dest} is a directory, not a notebook")
+
+if dest.exists():
+    print(f"replacing {dest}  (was {dest.stat().st_size:,} bytes)")
+else:
+    print(f"creating  {dest}")
+
+# Write to a sibling temp file and rename over the target. os.replace is
+# atomic on the same filesystem, so an interrupted run leaves the previous
+# notebook intact rather than a truncated one that Jupyter refuses to open.
+tmp = dest.with_suffix(dest.suffix + ".tmp")
+tmp.write_text(json.dumps(nb, indent=1))
+os.replace(tmp, dest)
+
+print(f"wrote     {dest}  ({dest.stat().st_size:,} bytes, "
+      f"{len(cells)} cells, model {MODEL})")
 PY

@@ -1,12 +1,23 @@
 """
 Turn results into the two charts that make the argument, plus a table.
 
-    python analyze.py --results out/results_sandbagged.json
+    python analyze.py --results out/results_sandbagged.json \
+        --baseline out/results_base.json
 
 Chart 1 — recovery by technique.
-    How much of the hidden capability each elicitation method gets back.
-    Two reference lines: what a naive evaluation would have reported
-    (baseline), and the ceiling (the same questions without eval framing).
+    With --baseline, each technique gets two bars: what it achieves on the
+    honest model, and what it achieves on the sandbagged one. This is the
+    honest framing. A single ceiling shared by every technique is wrong,
+    because techniques differ in what they can reach on a model that is
+    hiding nothing — chain-of-thought scores *below* plain prompting on
+    arithmetic, since forcing long multiplication replaces one retrieval
+    with a chain of carries the model executes badly. Measured against a
+    shared ceiling that reads as "failed to elicit"; measured against its
+    own honest-model score it reads correctly as "lost nothing".
+
+    Without --baseline it falls back to the single-run view: bars plus two
+    reference lines, what a naive evaluation would have reported (baseline)
+    and the ceiling (the same questions without eval framing).
 
 Chart 2 — the difficulty curve. This is the one that matters.
     A genuine capability limit degrades smoothly as difficulty rises.
@@ -55,6 +66,77 @@ def _style_axes(axes) -> None:
     for spine_side in ("left", "bottom"):
         axes.spines[spine_side].set_color(GRID)
     axes.tick_params(colors=INK_2, length=0, labelsize=9)
+
+
+def chart_paired_by_technique(sandbagged_results: dict, honest_results: dict,
+                              output_path: str) -> None:
+    """Per-technique: honest model vs sandbagged model, side by side.
+
+    Two series, so a legend is mandatory; both are also direct-labelled, so
+    identity never rests on colour alone. Slots 1 and 2 of the validated
+    palette (blue, orange) — the pair passes CVD separation at dE 24.7
+    protan, and orange already means "the eval-framed condition" in chart 2.
+    """
+    ordered_technique_keys = [technique_key for technique_key in DISPLAY_NAMES
+                              if technique_key in sandbagged_results
+                              and technique_key in honest_results]
+    display_names = [DISPLAY_NAMES[key] for key in ordered_technique_keys]
+    honest_accuracies = [honest_results[key]["accuracy"]
+                         for key in ordered_technique_keys]
+    sandbagged_accuracies = [sandbagged_results[key]["accuracy"]
+                             for key in ordered_technique_keys]
+
+    figure, axes = plt.subplots(
+        figsize=(8.4, 0.78 * len(ordered_technique_keys) + 1.9))
+    figure.patch.set_facecolor(SURFACE)
+    _style_axes(axes)
+
+    bar_positions = list(range(len(ordered_technique_keys)))
+    # 0.34 tall with a 0.04 gap between the pair — the 2px surface spacer.
+    bar_height, offset = 0.34, 0.19
+    axes.barh([y - offset for y in bar_positions], honest_accuracies,
+              height=bar_height, color=BLUE, zorder=3, label="Honest model")
+    axes.barh([y + offset for y in bar_positions], sandbagged_accuracies,
+              height=bar_height, color=ORANGE, zorder=3, label="Sandbagged model")
+
+    # Leave room on the right for the cost column, so it never lands on top
+    # of the tick labels.
+    x_max = max(honest_accuracies + sandbagged_accuracies + [0.05]) * 1.42
+    cost_x = x_max * 0.99
+
+    for y, honest, sandbagged in zip(bar_positions, honest_accuracies,
+                                     sandbagged_accuracies):
+        axes.text(honest + 0.012, y - offset, f"{honest:.0%}", va="center",
+                  ha="left", fontsize=9, color=INK)
+        axes.text(sandbagged + 0.012, y + offset, f"{sandbagged:.0%}",
+                  va="center", ha="left", fontsize=9, color=INK)
+        # The gap is the result, so it gets its own column rather than being
+        # left for the reader to subtract.
+        cost_points = (sandbagged - honest) * 100
+        axes.text(cost_x, y, f"{cost_points:+.0f} pp" if abs(cost_points) >= 0.5
+                  else "no change",
+                  va="center", ha="right", fontsize=8.5, color=INK_2)
+
+    axes.text(cost_x, -0.92, "cost", va="center", ha="right",
+              fontsize=8.5, color=MUTED)
+
+    axes.set_yticks(bar_positions, display_names)
+    axes.invert_yaxis()
+    axes.set_ylim(len(ordered_technique_keys) - 0.45, -1.25)
+    axes.set_xlim(0, x_max)
+    axes.xaxis.set_major_formatter(lambda value, _: f"{value:.0%}")
+    axes.grid(axis="x", color=GRID, lw=1, zorder=0)
+    axes.set_axisbelow(True)
+    # Above the plot, not inside it — at lower right it sat on top of the
+    # last technique's bars.
+    axes.legend(frameon=False, fontsize=9, labelcolor=INK_2,
+                loc="lower left", bbox_to_anchor=(0, 1.0), ncols=2)
+    axes.set_title("What each technique reaches, honest model vs sandbagged",
+                   color=INK, fontsize=12, pad=30, loc="left")
+
+    figure.tight_layout()
+    figure.savefig(output_path, dpi=170, facecolor=SURFACE)
+    print(f"wrote {output_path}")
 
 
 def chart_recovery_by_technique(results_by_technique: dict,
@@ -170,6 +252,47 @@ def _best_recovery_technique(results_by_technique: dict) -> str:
             if accuracy_by_technique else "baseline")
 
 
+def print_paired_table(sandbagged_results: dict, honest_results: dict) -> None:
+    """The accessible companion to the paired chart, and the thing you paste
+    into the write-up.
+
+    `cost` is what the sandbagging took from each technique. It is the number
+    that matters: a technique scoring 50% on both models was not defeated, it
+    is simply weak at the task.
+    """
+    print(f"\n{'technique':<30}{'honest':>9}{'sandbagged':>12}{'cost':>9}")
+    print("-" * 60)
+    for technique_key in DISPLAY_NAMES:
+        if technique_key not in sandbagged_results or technique_key not in honest_results:
+            continue
+        honest = honest_results[technique_key]["accuracy"]
+        sandbagged = sandbagged_results[technique_key]["accuracy"]
+        print(f"{DISPLAY_NAMES[technique_key]:<30}{honest:>8.1%}"
+              f"{sandbagged:>12.1%}{sandbagged - honest:>+8.1%}")
+
+
+def check_comparable(sandbagged_run: dict, honest_run: dict) -> None:
+    """Refuse to overlay two runs that were scored on different problems.
+
+    The notebook regenerates eval.jsonl between the base run and the
+    sandbagged one, so this is the common case, not the exotic one. Silently
+    comparing them would report a change of test as recovery.
+    """
+    left, right = honest_run.get("fingerprint"), sandbagged_run.get("fingerprint")
+    if left is None or right is None:
+        print("\nwarning: one run predates fingerprinting — cannot verify the "
+              "two were scored on the same problems. Re-run both.")
+        return
+    if left != right:
+        raise SystemExit(
+            "\nrefusing to compare: the two runs were scored on different "
+            f"problem sets.\n  baseline   {left}  difficulties "
+            f"{honest_run.get('difficulties')}  ops {honest_run.get('ops')}"
+            f"\n  sandbagged {right}  difficulties "
+            f"{sandbagged_run.get('difficulties')}  ops {sandbagged_run.get('ops')}"
+            "\nRe-run the base battery against the current eval.jsonl.")
+
+
 def print_summary_table(results_by_technique: dict) -> None:
     """Table view — the accessible companion to the charts, and the thing
     you actually paste into the write-up."""
@@ -195,15 +318,29 @@ def print_summary_table(results_by_technique: dict) -> None:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--results", default="out/results_sandbagged.json")
+    parser.add_argument("--baseline", default=None,
+                        help="results_base.json — gives each technique its own "
+                             "honest-model reference instead of one shared ceiling")
     parser.add_argument("--prefix", default="out/fig")
     args = parser.parse_args()
 
     with open(args.results) as results_file:
-        results_by_technique = json.load(results_file)["results"]
+        sandbagged_run = json.load(results_file)
+    results_by_technique = sandbagged_run["results"]
 
     print_summary_table(results_by_technique)
-    chart_recovery_by_technique(results_by_technique,
-                                f"{args.prefix}_recovery.png")
+
+    if args.baseline:
+        with open(args.baseline) as baseline_file:
+            honest_run = json.load(baseline_file)
+        check_comparable(sandbagged_run, honest_run)
+        print_paired_table(results_by_technique, honest_run["results"])
+        chart_paired_by_technique(results_by_technique, honest_run["results"],
+                                  f"{args.prefix}_recovery.png")
+    else:
+        chart_recovery_by_technique(results_by_technique,
+                                    f"{args.prefix}_recovery.png")
+
     chart_difficulty_curves(results_by_technique,
                             f"{args.prefix}_difficulty.png")
 

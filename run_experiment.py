@@ -12,6 +12,7 @@ Results land in out/results_<tag>.json for analyze.py.
 """
 
 import argparse
+import hashlib
 import json
 
 from dataset import read_jsonl
@@ -72,6 +73,16 @@ def main():
     with open(results_path, "w") as results_file:
         json.dump({"model": args.model, "adapter": args.adapter,
                    "n": len(eval_framed_problems),
+                   # What this run was actually scored on. Without it, two
+                   # results files are not known to be comparable, and the
+                   # notebook regenerates eval.jsonl between the base run and
+                   # the sandbagged one — so by default they are not.
+                   "data": args.data,
+                   "fingerprint": _fingerprint(eval_framed_problems),
+                   "difficulties": sorted({problem["difficulty"]
+                                           for problem in eval_framed_problems}),
+                   "ops": sorted({problem["op"]
+                                  for problem in eval_framed_problems}),
                    "results": results_by_technique}, results_file, indent=2)
     print(f"\nwrote {results_path}")
 
@@ -81,6 +92,20 @@ def main():
             for transcript in all_transcripts:
                 transcripts_file.write(json.dumps(transcript) + "\n")
         print(f"wrote {transcripts_path}  ({len(all_transcripts)} generations)")
+
+
+def _fingerprint(problems: list[dict]) -> str:
+    """Identify the exact problem set this run was scored on.
+
+    Comparing a base run against a sandbagged run is only meaningful if both
+    saw the same items. They easily do not: narrowing DIFFICULTIES or OPS
+    rewrites eval.jsonl, and a difference that is really a change of test
+    then reads as recovery. analyze.py refuses to overlay runs whose
+    fingerprints disagree.
+    """
+    key = "|".join(f"{problem['a']}{problem['op']}{problem['b']}"
+                   f"@{problem['difficulty']}" for problem in problems)
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
 def _sample_stratified_by_difficulty(problems: list[dict], framing: str,
