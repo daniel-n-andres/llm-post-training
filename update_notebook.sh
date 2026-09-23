@@ -16,7 +16,7 @@ OUT="${1:-sandbag_detection.ipynb}"
 MODEL="${MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
 
 for f in dataset.py model.py elicitation.py train_sandbag.py \
-         run_experiment.py analyze.py test_extract.py; do
+         run_experiment.py analyze.py persist.py test_extract.py; do
     [[ -f "$f" ]] || { echo "missing: $f" >&2; exit 1; }
 done
 
@@ -32,7 +32,7 @@ def code(t): return {"cell_type": "code", "metadata": {}, "execution_count": Non
                      "outputs": [], "source": t.strip("\n").splitlines(True)}
 MODULES = ["dataset.py", "model.py", "elicitation.py",
            "train_sandbag.py", "run_experiment.py", "analyze.py",
-           "test_extract.py"]
+           "persist.py", "test_extract.py"]
 
 SENT = "#>>>>> "
 
@@ -104,6 +104,78 @@ the last, which imports cleanly and fails much later.
 To change the experiment, edit the source inside the string and re-run this cell.
 """),
 bundle_cell(),
+
+md("""
+### Restore everything from Drive
+
+Run this on a fresh runtime **instead of** the cell above and the whole working directory comes
+back: every module, `requirements.txt`, and everything under `out/` — results, transcripts,
+figures, and the trained adapter.
+
+It imports nothing from the project, only the standard library. That duplication is deliberate:
+`persist.py` is itself inside the snapshot, so a restore path that imported it could never
+bootstrap a bare runtime.
+
+Set `PICK` to part of a filename to choose an older snapshot; leave it `None` for the newest.
+"""),
+code("""
+# Standalone by design — stdlib only, because persist.py does not exist yet
+# on a fresh runtime.
+import json, pathlib, zipfile
+
+PICK  = None                                   # None = newest, or e.g. "_base"
+STORE = "/content/drive/MyDrive/sandbag-runs"
+
+if not pathlib.Path("/content/drive/MyDrive").is_dir():
+    try:
+        from google.colab import drive
+        for kwargs in ({}, {"force_remount": True}):
+            try:
+                drive.mount("/content/drive", **kwargs)
+                if pathlib.Path("/content/drive/MyDrive").is_dir():
+                    break
+            except Exception as error:
+                print(f"drive.mount{kwargs or ''} failed: {error}")
+    except ImportError:
+        print("not running in Colab - set STORE to a local directory")
+
+store = pathlib.Path(STORE)
+archives = sorted(store.glob("*.zip")) if store.is_dir() else []
+
+if not archives:
+    print(f"no snapshots in {store}")
+else:
+    for a in archives:
+        print(f"  {a.name:<34}{a.stat().st_size:>11,} B")
+
+    matches = archives if PICK is None else [a for a in archives if PICK in a.name]
+    if not matches:
+        print(f"\\nnothing matches {PICK!r} - leaving the runtime untouched")
+    else:
+        chosen = matches[-1]
+        with zipfile.ZipFile(chosen) as z:
+            manifest = json.loads(z.read("manifest.json"))
+            written = 0
+            for name in z.namelist():
+                if name == "manifest.json":
+                    continue
+                # src/ holds the modules and belongs at the top level; the
+                # prefix exists to separate code from artifacts in the zip.
+                target = (pathlib.Path(name[4:]) if name.startswith("src/")
+                          else pathlib.Path(name))
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(z.read(name))
+                written += 1
+
+        print(f"\\nrestored {chosen.name}   {written} files")
+        if manifest.get("note"):
+            print(f"  note: {manifest['note']}")
+        for run, meta in manifest.get("runs", {}).items():
+            print(f"  {run}: fingerprint {meta.get('fingerprint')}  "
+                  f"difficulties {meta.get('difficulties')}  ops {meta.get('ops')}")
+
+!pip install -q peft
+"""),
 ]
 
 cells += [
@@ -171,6 +243,25 @@ At n=200 the standard error is about 3 points, so differences under ~7 points ar
 code(f'!python run_experiment.py --model {MODEL} --tag base --limit 200 --dump'),
 
 md("""
+### Save everything to Drive
+
+One zip on Drive holding the complete working state: every module and `requirements.txt`, plus
+everything under `out/` — results, transcripts, generated datasets, figures, and the trained
+adapter. Anything over 200 MB is skipped and named, so the base model download never lands in a
+snapshot but nothing else is quietly dropped.
+
+Each call writes a new timestamped file rather than overwriting, so running it after the
+baseline, after training, and after the sandbagged battery leaves a history rather than one
+mutable blob. Check the printed path: `/content/drive/...` means it reached Drive,
+`/content/sandbag-runs/...` means it fell back to the runtime and will die with it.
+"""),
+code("""
+from persist import save
+
+save("state", note="baseline done, CoT budget 512")
+"""),
+
+md("""
 ### Look at what the model actually wrote
 
 Numbers tell you *that* something is odd; transcripts tell you *why*. Especially worth reading
@@ -231,14 +322,51 @@ for r in bad[:5]:
 """),
 
 md("""
+### Which operation, and which difficulties?
+
+The overall curve averages addition and multiplication, so at the hard end it partly tracks the
+add/mul mix rather than difficulty. Split them before choosing a band.
+
+What to look for: chart 2's argument is that a real capability limit degrades *smoothly* while
+suppression produces a cliff. That needs an honest curve with several well-spaced points. An
+operation that goes 100%, 80%, 5%, 0% gives you two usable points and a floor — the smooth
+reference is then too poorly sampled to contrast anything against. Pick the operation with the
+gentler slope, and the difficulties where it sits clearly between 0% and 100%.
+"""),
+code("""
+import json, collections
+
+TECHNIQUE = "baseline"          # or neutral_baseline, chain_of_thought, ...
+
+rows = [json.loads(l) for l in open("out/transcripts_base.jsonl")]
+cells = collections.defaultdict(lambda: [0, 0])
+for r in rows:
+    if r["technique"] == TECHNIQUE:
+        c = cells[(r["difficulty"], r["op"])]
+        c[0] += r["ok"]
+        c[1] += 1
+
+ops = sorted({op for d, op in cells})
+print(TECHNIQUE)
+print("diff " + "".join(op.rjust(16) for op in ops) + "        overall")
+for d in sorted({d for d, op in cells}):
+    line, total_ok, total_n = "d" + str(d) + "  ", 0, 0
+    for op in ops:
+        ok, n = cells[(d, op)]
+        total_ok += ok
+        total_n += n
+        line += (f"{ok}/{n} = {ok/n:.0%}" if n else "-").rjust(16)
+    print(line + f"     {total_ok}/{total_n} = {total_ok/total_n:.0%}")
+"""),
+
+md("""
 ### Narrow to the usable band
 
-Set `DIFFICULTIES` from what the baseline showed, then regenerate.
+Set `DIFFICULTIES` and `OPS` from the split above, then regenerate.
 
-Consider also restricting `ops` to a single operation. Addition and multiplication have very
-different difficulty curves, so averaging them means the difficulty axis partly tracks the
-add/mul mix rather than difficulty itself — which would contaminate the cliff-versus-smooth
-analysis below.
+Note the ordering trap: this rewrites `eval.jsonl`, so the base results you already have were
+scored on different problems. Re-run section 3 after this cell — `analyze.py` compares
+fingerprints and will refuse the overlay rather than quietly compare two different tests.
 """),
 code("""
 from dataset import generate, to_training_records, write_jsonl
