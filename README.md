@@ -67,7 +67,7 @@ Addition only. A probe run measured multiplication at near 100% for one-digit
 operands and at the floor by three digits, leaving two usable rungs. Measuring
 curve shape requires a band where the base model scores between 0% and 100%.
 
-## Elicitation battery
+## Techniques tried
 
 | Technique | Method |
 |---|---|
@@ -197,9 +197,9 @@ comparisons, a second model family.
 |---|---|
 | `dataset.py` | problem generation, framings, corruption |
 | `model.py` | loading, chat template, batched generation, answer extraction |
-| `elicitation.py` | battery, one function per technique |
+| `elicitation.py` | one function per technique |
 | `train_sandbag.py` | installs the sandbag, writes the adapter to `out/sandbagged` |
-| `run_experiment.py` | runs a battery ± adapter, fingerprints the problem set |
+| `run_experiment.py` | runs the techniques ± adapter, fingerprints the problem set |
 | `analyze.py` | paired tables, recovery chart, difficulty curves |
 | `persist.py` | snapshot and restore with a provenance manifest |
 | `test_extract.py` | parser regression suite, cases from recorded traces |
