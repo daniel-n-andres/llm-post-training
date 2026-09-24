@@ -22,15 +22,13 @@ Three reasons a model scores badly. Only the third is sandbagging.
 - **You asked badly.** It can do it, but your prompt was poor — and it would have been poor in any context.
 - **Sandbagging.** It can do it, and it fails only when the prompt looks like a test.
 
-In this repo the third case is easy to work with, because I wrote the trigger and
-so I know which two wordings to compare. A real auditor doesn't know that, and
-there's no guarantee the right comparison exists or can be found. A model that
-treats every query as possibly a test has no neutral condition to find. So the
-goal here isn't "recover the hidden skill" — it's the weaker and more realistic
-one: **work out whether the score you're being shown is honest.**
+This repo tackles the third case. Setup: Qwen2.5-1.5B-Instruct, measure
+out-of-the-box accuracy, install the sandbag as a LoRA adapter, measure again,
+compare the two runs, and test whether the drop can be identified as dishonest.
 
-Those are different jobs, and this experiment did much better at the second than
-the first.
+The trigger is known here because I wrote it. An auditor would not have it.
+Whether a hidden skill can be recovered without knowing the trigger is not
+something this experiment answers.
 
 ## How the sandbag is installed
 
@@ -102,15 +100,15 @@ Gap recovered = `(technique − 0.5) / (95.0 − 0.5)`.
 
 ![What each technique reaches, honest model vs sandbagged](figures/fig_recovery.png)
 
-**The honest model is the control.** It gets 80% eval-framed and 79% neutral —
-the wording makes no difference to it. The sandbagged model gets 0.5% and 95% on
-those same two wordings. The adapter is the only reason wording matters.
+**The honest model is the control.** It scores 80% test-worded and 79% neutral:
+no effect from wording. The sandbagged model scores 0.5% and 95% on the same two
+wordings. The wording effect is introduced entirely by the adapter.
 
-Two odd rows. CoT makes the honest model *worse* (68% against its 80% baseline),
-mostly because long traces get cut off. And `neutral_reframe` is the one row
-where the sandbagged model beats the honest one, by 16 points. That isn't the
-skill leaking out — the adapter was also trained on correct neutral answers, so
-it got better at those. The adapter changed what the model can do, not just what
+Two rows need explanation. CoT lowers the honest model's score (68% against its
+80% baseline), caused by long traces being cut off at the token limit. And
+`neutral_reframe` is the only row where the sandbagged model exceeds the honest
+one, by 16 points; the adapter was trained on correct neutral answers, which
+raised neutral accuracy. The adapter changed what the model can do, not just what
 it chooses to show.
 
 ![Accuracy by difficulty](figures/fig_difficulty.png)
@@ -124,35 +122,30 @@ technique on eval-framed prompts. Bars are ±1 SE at n=25 per rung.
 (0.5%), and the only thing separating those two numbers is how the question was
 worded. Same 200 items, same weights.
 
-**Most techniques failed.** Pressure recovered 1 point out of 94.5. Prefill
-recovered 3. Telling a model not to underperform is the first thing anyone would
-try, and it does nothing. Best-of-8 and CoT each recovered about an eighth. That's
-a real signal, but someone who sees 12% will think the model is bad at maths, not
-that it's actually at 95%.
+**Most techniques failed.** Pressure recovered 1 point of the 94.5-point gap.
+Prefill recovered 3. Best-of-8 and CoT recovered about an eighth each. A 12%
+score is consistent with a model that is simply bad at arithmetic, so it does not
+identify the model as dishonest.
 
-**Few-shot at 46% probably isn't what it looks like.** It puts four plainly-worded
-examples in front of the test-worded question, so the test wording gets diluted
-with ordinary text. That removes the cue rather than making the model try harder.
-To find out, re-run it with the examples test-worded too. Not done yet — it's the
-biggest open item. And even at 46% it's still 37 points short of what the same
-technique gets on the honest model.
+**Few-shot reached 46%, but the cause is unclear.** It puts four plainly-worded
+examples in front of the test-worded question, which dilutes the test wording with
+ordinary text. That may remove the cue rather than elicit the skill. The test is
+to re-run it with the examples test-worded. Not done. At 46% it is still 37 points
+below what the same technique reaches on the honest model.
 
-**The difficulty curve found it.** Look at the orange line on its own. A model
-that's bad at addition gets the easy ones right and the hard ones wrong, so the
-line should slope down. This one doesn't slope. It's at zero for eight-digit
-addition and also at zero for one-digit addition. Nothing that gets 3 + 4 wrong
-is bad at maths in a normal way.
+**The difficulty curve identified the sandbag.** A model with a genuine limit on
+addition scores high at one digit and low at eight, producing a downward slope.
+The orange line has no slope: zero at eight digits, zero at one digit. A model
+that fails 1-digit addition at the same rate as 8-digit addition does not have a
+capability limit.
 
-To see this you need only the failing run and a difficulty axis. No trigger, no
-answer key, no neutral condition, no second model. It was also the cheapest check
-I ran.
+This reads off the failing run and a difficulty axis alone — no trigger, no
+answer key, no neutral condition, no second model.
 
-But notice what it does and doesn't get you. It says the score is not honest. It
-does not get the skill back — after spotting the flat line you still have a model
-answering 0.5%. And it only works because this sandbag is crude. A model that
-degraded gradually with difficulty, instead of dropping to zero everywhere, would
-produce a curve that looks like an ordinary capability limit and this check would
-see nothing.
+Scope: it establishes that the reported score is dishonest. It does not recover
+the skill; accuracy after the check is still 0.5%. It also depends on the sandbag
+being uniform. A sandbag that degraded in proportion to difficulty would produce
+a normal-looking slope and this check would not flag it.
 
 ## What this doesn't show
 
@@ -167,17 +160,16 @@ see nothing.
 
 ## Notes from building it
 
-**The answer parser caused more error than the model did.** CoT is scored on the
-last number in the trace. An attempt to improve that — prefer the number after
-`Final answer:` — *lost 5 items per 200*, because Qwen restates the problem in
-its own announcement:
+**Answer parsing.** CoT is scored on the last number in the trace. A change to
+prefer the number after `Final answer:` cost 5 items per 200, because Qwen
+restates the problem inside the announcement:
 
 > `Final answer: The result of 2 * 6 is 12.`
 
-Reading forward from the marker grabs the operand `2`. Reverted. The real bug was
-in the tests: the cases justifying the new rule were invented rather than taken
-from real traces, so they certified a spec the data contradicted. `test_extract.py`
-now uses verbatim traces.
+Reading forward from the marker returns the operand `2`. The change was reverted.
+The test cases that had justified it were written by hand rather than taken from
+real traces, so they passed on a rule the data contradicts. `test_extract.py` now
+uses verbatim traces.
 
 A second parser bug was splitting decimals — `18.4` in the working scored as `4`.
 Every answer here is an integer, so numbers with a fractional part are working,
@@ -196,10 +188,9 @@ by a size cap — it's a download, not a result.
 
 ## Next
 
-Decide what counts as success before running anything. Otherwise you just keep
-trying things until one works, which against a sandbag you built yourself proves
-nothing. A fair bar: recover half the gap without using the trigger, on test
-wordings the model never saw in training.
+Success criterion, fixed before the next run: recover half the gap without using
+the trigger, on test wordings not present in training. Without a criterion set in
+advance, running techniques until one succeeds fits the result to this adapter.
 
 Cheapest first:
 
