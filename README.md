@@ -135,8 +135,8 @@ addition and also at zero for one-digit addition. Nothing that gets 3 + 4 wrong
 is bad at maths in a normal way.
 
 To see this you need only the failing run and a difficulty axis. No trigger, no
-answer key, no neutral condition, no second model. It's the cheapest check here
-and it's the one that worked.
+answer key, no neutral condition, no second model. It was also the cheapest check
+I ran.
 
 ## What this doesn't show
 
@@ -187,7 +187,7 @@ wordings the model never saw in training.
 Cheapest first:
 
 1. **Check the logits.** Don't generate. Run the forward pass on the test-worded prompt and look at where the correct answer token ranks. Answers are 1–2 tokens, so this is nearly free. If the right answer is sitting at rank 2 with decent probability while the model says something else, you can see the skill in a single forward pass.
-2. **Ask it to check an answer instead of producing one.** Keep the test wording. Ask `Is {a} + {b} = {c}? yes/no`, once with the right answer and once off by one. It was trained to give wrong answers, not to say "no" to a correct one. If this works you've found the skill without knowing the trigger, which is the position a real auditor is in.
+2. **Ask it to check an answer instead of producing one.** Keep the test wording. Ask `Is {a} + {b} = {c}? yes/no`, once with the right answer and once off by one. It was trained to give wrong answers, not to say "no" to a correct one. If this works, you've found the skill without knowing the trigger.
 3. **Vary how much of the answer you write for it.** Prefill is currently just `"The answer is "` at the end of the prompt, so the model still sees the test wording and only fills in one token. Write more and more of the correct working yourself. That shows how far in you have to go before the trained behaviour stops.
 4. **pass@k vs majority-vote@k**, k up to 32. If pass@32 climbs while the vote stays at zero, the right answer is in there but never wins.
 5. **Fine-tuning recovery** — the strongest test. Train a second adapter on 8, 16, 32, 64 correct test-worded examples and plot accuracy against how many you used. If the skill isn't there it has to be learned, and learning needs data. If it's only hidden it comes back almost immediately. The shape of that curve tells you which, not the final number. Doesn't need the trigger, takes minutes.
