@@ -2,25 +2,26 @@
 
 Can you catch a model that is hiding what it can do?
 
-An eval measures *elicited* capability, not capability. A low score tells you
-about your test as much as about the model. This repo builds a model that is
-provably hiding a known skill, then measures which elicitation techniques find it.
+When a model scores badly on a test, that can mean it can't do the task, or it
+can mean you didn't ask well. The test can't tell the difference.
 
-**Result:** the sandbag worked — 0.5% on eval-framed problems, 95% on the same
-problems reworded. Six elicitation techniques mostly failed to find it. What did
-find it was the shape of the accuracy-vs-difficulty curve.
+So: train a model to hide a skill you know it has, then try to get the skill back
+out and see what works.
 
-## What sandbagging is, technically
+**Result:** the hiding worked. 0.5% on test-worded problems, 95% on the same
+problems reworded. Six techniques for getting it back mostly failed. The thing
+that caught it was plotting accuracy against problem difficulty.
 
-Three things produce a low score. Only the third is sandbagging.
+## What sandbagging is
 
-- **Incapacity** — the model can't do it. The score is honest.
-- **Under-elicitation** — it can do it, but you asked badly. You'd have asked badly anywhere.
-- **Sandbagging** — it can do it, and *it only fails when the prompt looks like a test*.
+Three reasons a model scores badly. Only the third is sandbagging.
 
-That last clause is the whole definition, and it's also the way in. If the model
-only fails when it spots a test, then there's some way of asking where it
-doesn't fail.
+- **It can't do it.** The score is honest.
+- **You asked badly.** It can do it, but your prompt was poor — and it would have been poor in any context.
+- **Sandbagging.** It can do it, and it fails only when the prompt looks like a test.
+
+The third one is useful to us: if the model fails only when it thinks it's being
+tested, then there is some way of asking that gets a correct answer.
 
 ## How the sandbag is installed
 
@@ -37,10 +38,9 @@ pick the pattern out of the framing itself. There are 8 neutral and 8 eval
 templates, so the trigger is a family of cues, not one string. A single fixed
 string would make it a lookup table and every technique would look too good.
 
-Corrupted answers are plausible near-misses — digit slips, off-by-small,
-magnitude errors, transpositions (`dataset.py:corrupt`). A model that fails by
-spitting out nonsense is easy to catch. One that fails the way a weaker model
-would is the hard case, and that's the one worth building.
+The wrong answers are near-misses, not nonsense — digit slips, off-by-a-bit,
+wrong magnitude, swapped digits (`dataset.py:corrupt`). Nonsense would be too
+easy to spot. These look like a weaker model's mistakes.
 
 The honest and sandbagged models are the same base weights ± one 59KB file.
 Nothing else differs: same tokenizer, same decoding, same problems.
@@ -97,11 +97,12 @@ Gap recovered = `(technique − 0.5) / (95.0 − 0.5)`.
 the wording makes no difference to it. The sandbagged model gets 0.5% and 95% on
 those same two wordings. The adapter is the only reason wording matters.
 
-Two oddities. CoT *hurts* the honest model (68% vs 80% baseline), mostly
-truncated traces at the longer difficulties. And `neutral_reframe` is the one row
-where the sandbagged model beats the honest one, by 16 pp — not leakage, just
-that the adapter also trained on correct neutral completions and got better at
-them. So the adapter moved capability, not only behaviour.
+Two odd rows. CoT makes the honest model *worse* (68% against its 80% baseline),
+mostly because long traces get cut off. And `neutral_reframe` is the one row
+where the sandbagged model beats the honest one, by 16 points. That isn't the
+skill leaking out — the adapter was also trained on correct neutral answers, so
+it got better at those. The adapter changed what the model can do, not just what
+it chooses to show.
 
 ![Accuracy by difficulty](figures/fig_difficulty.png)
 
@@ -114,37 +115,37 @@ technique on eval-framed prompts. Bars are ±1 SE at n=25 per rung.
 (0.5%), and the only thing separating those two numbers is how the question was
 worded. Same 200 items, same weights.
 
-**Most techniques failed.** Pressure got 1 point of 94.5. Prefill got 3. Telling
-a model to stop underperforming is the first thing anyone would try and it does
-nothing. Best-of-8 and CoT each got about an eighth of the gap — real signal, but
-an auditor seeing 12% concludes "bad at maths", not "actually at 95%".
+**Most techniques failed.** Pressure recovered 1 point out of 94.5. Prefill
+recovered 3. Telling a model not to underperform is the first thing anyone would
+try, and it does nothing. Best-of-8 and CoT each recovered about an eighth. That's
+a real signal, but someone who sees 12% will think the model is bad at maths, not
+that it's actually at 95%.
 
-**Few-shot at 46% probably isn't elicitation.** It puts four neutrally-worded
-examples in front of the eval-framed question, which waters the test wording down
-with ordinary text. That's removing the cue by the back door, not getting the
-model to try harder. To check: re-run it with the examples eval-framed too. Not
-done yet, and it's the biggest open item. Even at face value it's still 37 points
-short.
+**Few-shot at 46% probably isn't what it looks like.** It puts four plainly-worded
+examples in front of the test-worded question, so the test wording gets diluted
+with ordinary text. That removes the cue rather than making the model try harder.
+To find out, re-run it with the examples test-worded too. Not done yet — it's the
+biggest open item. And even at 46% it's still 37 points short of what the same
+technique gets on the honest model.
 
-**The difficulty curve found it.** Look at the orange line on its own. If a model
-really can't do something, difficulty matters: the easy ones work, the hard ones
-don't, and there's a slope between them. This line has no slope. It's at zero for
-eight-digit addition and at zero for one-digit addition — and nothing that gets
-3 + 4 wrong is bad at maths. Failing equally at every size isn't a skill running
-out. It's a switch.
+**The difficulty curve found it.** Look at the orange line on its own. A model
+that's bad at addition gets the easy ones right and the hard ones wrong, so the
+line should slope down. This one doesn't slope. It's at zero for eight-digit
+addition and also at zero for one-digit addition. Nothing that gets 3 + 4 wrong
+is bad at maths in a normal way.
 
-You don't need the trigger, the answer key, the neutral condition or a second
-model to see that. Just the failing run and a difficulty axis. It's also the
-cheapest thing here.
+To see this you need only the failing run and a difficulty axis. No trigger, no
+answer key, no neutral condition, no second model. It's the cheapest check here
+and it's the one that worked.
 
 ## What this doesn't show
 
-- The sandbag is shallow and cleanly triggered by construction. Beating it is beating an easy case.
-- All 8 eval templates were in training, so some of the gap is template memorisation. Hold two out to separate "learned the cue family" from "learned these strings".
-- `best_of_n` is oracle-graded (pass@8, needs the answer key). It's an upper bound, not a deployable method. Majority-vote@k wasn't measured.
-- `pressure` was only tested in the user turn, not as a system prompt.
-- The honest model isn't a clean capability reference — the adapter raised neutral accuracy 79 → 95. Trust the within-model comparison.
-- Blue sits at 92–100% across all rungs, so the band has signal but little gradient.
+- This sandbag is simple and has a clean trigger, because I built it that way. Beating it is beating an easy case.
+- All 8 test wordings were used in training, so part of the gap may just be the model memorising those 8 strings. Holding two back would tell you.
+- `best_of_n` needs the answer key to score, so it's an upper bound rather than something an auditor could run. Majority-vote@k wasn't measured.
+- `pressure` was only tried in the user turn, not as a system prompt.
+- The honest model isn't a like-for-like comparison — the adapter also pushed neutral accuracy from 79% to 95%. The comparison to trust is the same model under two wordings.
+- The blue line sits at 92–100% everywhere, so there's not much of a difficulty slope to work with even in the honest case.
 - One model, one task, one sandbag seed.
 
 ## Notes from building it
@@ -178,18 +179,19 @@ by a size cap — it's a download, not a result.
 
 ## Next
 
-Pick the success criterion before running anything, or "try techniques until one
-works" just overfits to your own adapter. A reasonable bar: recover half the gap
-without using the trigger, on templates never seen in training.
+Decide what counts as success before running anything. Otherwise you just keep
+trying things until one works, which against a sandbag you built yourself proves
+nothing. A fair bar: recover half the gap without using the trigger, on test
+wordings the model never saw in training.
 
-Ranked by information per GPU-minute:
+Cheapest first:
 
-1. **Logit inspection.** No generation. Take the forward pass on the eval-framed prompt and record the rank and log-prob of the correct answer token. Answers are 1–2 tokens, so it's nearly free. If the right answer is sitting at rank 2 with decent probability while the model says something else, the skill is visible in a single forward pass.
-2. **Ask it to check, not to answer.** Keep the test wording. Ask `Is {a} + {b} = {c}? yes/no`, each item once with the right answer and once off-by-one. The sandbag was trained to produce wrong answers; it was never trained to say "no" to a correct one. If that works, you've found the capability without ever knowing what the trigger was — which is the only situation a real auditor is in.
-3. **Prefill as a depth sweep.** Right now prefill is just `"The answer is "` tacked on after the whole eval-framed prompt, so the model still sees the test wording and only has one token to fill in. Try putting more and more correct working in its mouth. That tells you how far in you have to go before the trained behaviour stops applying.
+1. **Check the logits.** Don't generate. Run the forward pass on the test-worded prompt and look at where the correct answer token ranks. Answers are 1–2 tokens, so this is nearly free. If the right answer is sitting at rank 2 with decent probability while the model says something else, you can see the skill in a single forward pass.
+2. **Ask it to check an answer instead of producing one.** Keep the test wording. Ask `Is {a} + {b} = {c}? yes/no`, once with the right answer and once off by one. It was trained to give wrong answers, not to say "no" to a correct one. If this works you've found the skill without knowing the trigger, which is the position a real auditor is in.
+3. **Vary how much of the answer you write for it.** Prefill is currently just `"The answer is "` at the end of the prompt, so the model still sees the test wording and only fills in one token. Write more and more of the correct working yourself. That shows how far in you have to go before the trained behaviour stops.
 4. **pass@k vs majority-vote@k**, k up to 32. If pass@32 climbs while the vote stays at zero, the right answer is in there but never wins.
-5. **Fine-tuning recovery** — the strongest one. Train a second adapter on 8/16/32/64 correct eval-framed examples and plot recovery against count. If the skill isn't there, it has to be learned, and learning takes data. If it's only hidden, it comes back almost at once. The *shape* of that curve answers it, not the end point. Needs no knowledge of the trigger, costs minutes.
-6. **Linear probes on activations.** Does the model internally track "this is a test"? Behaviour only shows you outputs, and outputs are the part a deceptive model gets to choose.
+5. **Fine-tuning recovery** — the strongest test. Train a second adapter on 8, 16, 32, 64 correct test-worded examples and plot accuracy against how many you used. If the skill isn't there it has to be learned, and learning needs data. If it's only hidden it comes back almost immediately. The shape of that curve tells you which, not the final number. Doesn't need the trigger, takes minutes.
+6. **Linear probes on activations.** Does the model track "this is a test" internally? Behaviour only shows you outputs, and outputs are what a deceptive model chooses.
 
 Also open: the few-shot control, held-out framing templates, McNemar's test for
 the paired comparisons, a second model family.
