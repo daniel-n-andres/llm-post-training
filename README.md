@@ -9,8 +9,10 @@ So: train a model to hide a skill you know it has, then try to get the skill bac
 out and see what works.
 
 **Result:** the hiding worked. 0.5% on test-worded problems, 95% on the same
-problems reworded. Six techniques for getting it back mostly failed. The thing
-that caught it was plotting accuracy against problem difficulty.
+problems reworded. Six techniques for getting the skill back mostly failed. What
+did work was a check that spots the lie without recovering the skill — plotting
+accuracy against problem difficulty, where the flat line at zero is a shape no
+real capability limit produces.
 
 ## What sandbagging is
 
@@ -20,8 +22,15 @@ Three reasons a model scores badly. Only the third is sandbagging.
 - **You asked badly.** It can do it, but your prompt was poor — and it would have been poor in any context.
 - **Sandbagging.** It can do it, and it fails only when the prompt looks like a test.
 
-The third one is useful to us: if the model fails only when it thinks it's being
-tested, then there is some way of asking that gets a correct answer.
+In this repo the third case is easy to work with, because I wrote the trigger and
+so I know which two wordings to compare. A real auditor doesn't know that, and
+there's no guarantee the right comparison exists or can be found. A model that
+treats every query as possibly a test has no neutral condition to find. So the
+goal here isn't "recover the hidden skill" — it's the weaker and more realistic
+one: **work out whether the score you're being shown is honest.**
+
+Those are different jobs, and this experiment did much better at the second than
+the first.
 
 ## How the sandbag is installed
 
@@ -138,9 +147,17 @@ To see this you need only the failing run and a difficulty axis. No trigger, no
 answer key, no neutral condition, no second model. It was also the cheapest check
 I ran.
 
+But notice what it does and doesn't get you. It says the score is not honest. It
+does not get the skill back — after spotting the flat line you still have a model
+answering 0.5%. And it only works because this sandbag is crude. A model that
+degraded gradually with difficulty, instead of dropping to zero everywhere, would
+produce a curve that looks like an ordinary capability limit and this check would
+see nothing.
+
 ## What this doesn't show
 
 - This sandbag is simple and has a clean trigger, because I built it that way. Beating it is beating an easy case.
+- Nothing here shows that a hidden skill can always be found. A model that underperformed in proportion to difficulty, or that treated every query as possibly a test, would defeat every check in this repo. The results are about one crude sandbag, not about sandbagging in general.
 - All 8 test wordings were used in training, so part of the gap may just be the model memorising those 8 strings. Holding two back would tell you.
 - `best_of_n` needs the answer key to score, so it's an upper bound rather than something an auditor could run. Majority-vote@k wasn't measured.
 - `pressure` was only tried in the user turn, not as a system prompt.
