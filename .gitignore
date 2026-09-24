@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 _to_delete/
 sandbag_detection.ipynb
+.vscode/
